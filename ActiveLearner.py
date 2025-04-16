@@ -76,10 +76,30 @@ class BaseActiveLearner:
         raise NotImplementedError 
 
     def update_known(self, query_df):
+        """Update the known set.
+        
+        Parameters:
+            query_df: pd.DataFrame
+                Queried ratings to be added to the known set.
+        """
         self.kn_df = pd.concat([self.kn_df, query_df], axis=0).drop_duplicates() 
 
     def run_epoch(self, iid_to_gender):
+        """Run an epoch of the active learning process:
+            1. Re-initialize the rec sys model.
+            2. Fit the rec sys model on the updated known set.
+            3. Perform evaluation on the test set.
+            4. Generate the items to be queried.
+            5. Update the known set.
         
+            Parameters:
+                iid_to_gender: dict
+                    A dictionary that maps `user_iid` to gender, required for Female/Male performance comparison.
+            
+            Returns:
+                dict
+                    Evaluation results for the epoch.
+        """
         # re-initialize the model
         model = self.model(self.model_hparams, self.kn_df, self.te_df, self.n_users, self.n_items, self.seed)
 
@@ -100,6 +120,7 @@ class BaseActiveLearner:
         
 
     def perform_evaluation(self, model, top_k, iid_to_gender):
+        
         pro_te_df, unpro_te_df = separate_by_gender(self.te_df, iid_to_gender)
         
         pro_topk_scores = model.recommend_k_items(pro_te_df, top_k, remove_seen=True)
@@ -135,7 +156,12 @@ class RatingBasedActiveLearner(BaseActiveLearner):
     def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, q=10, seed=42):
 
         super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, q, seed)
-        self.strategy = strategy 
+        
+        avail_strategies = ['MaxRating', 'MinRating', 'MixRating', 'Random']
+        if strategy not in avail_strategies:
+            raise ValueError("Strategy must be one of: 'MaxRating', 'MinRating', 'MixRating', or 'Random'.")
+        else:
+            self.strategy = strategy 
     
     def generate_queries(self, model):
         
@@ -160,6 +186,7 @@ class RatingBasedActiveLearner(BaseActiveLearner):
             user_tr_df = pd.concat([user_tr_df, rated_bef_df]).drop_duplicates(ignore_index=True, keep=False)
 
             if user_tr_df.shape[0] == 0:
+                # if we don't have any candidate ratings for this user, skip
                 continue 
 
             # get the items to make predictions
@@ -195,7 +222,7 @@ class RatingBasedActiveLearner(BaseActiveLearner):
                     user_tr_df_sorted = user_tr_df 
             
             else:
-                raise ValueError("Choose a strategy from [MaxRating, MinRating, MixRating, Random]")
+                raise ValueError("Strategy must be one of: 'MaxRating', 'MinRating', 'MixRating', or 'Random'.")
             
             query_df.append(user_tr_df_sorted.iloc[:self.q][['user_iid', 'item_iid', 'rating']])
         
@@ -203,3 +230,58 @@ class RatingBasedActiveLearner(BaseActiveLearner):
 
         return query_df
 
+class NonpersonalizedActiveLearner(BaseActiveLearner):
+
+    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, q=10, seed=42):
+
+        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, q, seed)
+        
+        avail_strategies = ['pop', 'var', 'popvar', 'ge', 'ran']
+        if strategy not in avail_strategies:
+            raise ValueError("Strategy must be one of: 'pop', 'var', 'popvar', 'ge', or 'ran'.")
+        else:
+            self.strategy = strategy 
+    
+    def generate_queries(self, model):
+        pass
+
+    def _generate_queries_pop(self):
+        """Popularity: select the most popular items in the candidate set."""
+        
+        item_pop_df = (self.tr_df.groupby('item_iid')['rating'].count()
+                       .reset_index(name='pop').sort_values(by='pop', ascending=False, ignore_index=True))
+        
+        min_pop, max_pop = item_pop_df['pop'].iloc[[-1, 0]]
+        item_pop_df['norm_pop'] = (item_pop_df['pop'] - min_pop) / (max_pop - min_pop)
+        
+        return item_pop_df
+    
+    def _generate_queries_var(self):
+        """Variance: select the items with highest variance."""
+
+        item_var_df = (self.tr_df.groupby('item_iid')['rating'].var(ddof=0)
+                       .reset_index(name='var').sort_values(by='var', ascending=False, ignore_index=True))
+        
+        return item_var_df 
+    
+    def _generate_queries_popvar(self):
+
+        """Popularity * Variance: normalized popularity times variance."""
+        item_pop_df = self._generate_queries_pop()
+        min_pop, max_pop = item_pop_df['pop'].iloc[[-1, 0]]
+        item_pop_df['norm_pop'] = (item_pop_df['pop'] - min_pop) / (max_pop - min_pop)
+
+        item_var_df = self._generate_queries_var()
+
+        item_popvar_df = pd.merge(item_pop_df, item_var_df, on='item_iid')
+        item_popvar_df['pop_var'] = np.sqrt(item_popvar_df['norm_pop']) * np.asarray(item_popvar_df['var'])
+
+        item_popvar_df = item_popvar_df.sort_values(by='pop_var', ascending=False, ignore_index=True)
+
+        return item_popvar_df 
+
+
+
+        
+
+    

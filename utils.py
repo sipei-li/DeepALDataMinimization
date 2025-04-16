@@ -103,7 +103,7 @@ def separate_by_gender(df, iid_to_gender):
         - Data frame of male users.
     """
 
-    df['gender'] = df.loc['user_iid'].map(iid_to_gender)
+    df['gender'] = df['user_iid'].map(iid_to_gender)
 
     pro_preds = df[df['gender'] == 'F']
     unpro_preds = df[df['gender'] != 'F']
