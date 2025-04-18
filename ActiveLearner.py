@@ -146,7 +146,8 @@ class BaseActiveLearner:
         results = {"map": [pro_map, unpro_map],
                   "ndcg": [pro_ndcg, unpro_ndcg],
                   "precision": [pro_precision, unpro_precision],
-                  "recall": [pro_recall, unpro_recall]}
+                  "recall": [pro_recall, unpro_recall],
+                  "percentage": (self.kn_df.shape[0] / self.tr_df.shape[0])}
 
         return results
 
