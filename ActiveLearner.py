@@ -63,14 +63,6 @@ class BaseActiveLearner:
 
         # initialize the known set with 5% of each user
         self.kn_df = self.tr_df.groupby('user_iid').sample(frac=0.05, random_state=self.seed)
-
-        # initialize the query record (dictionary-of-keys) matrix
-        self.queried_NM = sp.dok_matrix((self.n_users, self.n_items), dtype=np.int32)
-
-        # update the query record matrix with the initial known set
-        for _, row in self.kn_df.iterrows():
-            user_iid, item_iid = row[['user_iid', 'item_iid']]
-            self.queried_NM[user_iid, item_iid] = 1
     
     def generate_queries(self, model):
         """Generate an array of query items for each user.
@@ -180,6 +172,14 @@ class RatingBasedActiveLearner(BaseActiveLearner):
             raise ValueError("Strategy must be one of: 'MaxRating', 'MinRating', 'MixRating', or 'Random'.")
         else:
             self.strategy = strategy 
+        
+        # initialize the query record (dictionary-of-keys) matrix
+        self.queried_NM = sp.dok_matrix((self.n_users, self.n_items), dtype=np.int32)
+
+        # update the query record matrix with the initial known set
+        for _, row in self.kn_df.iterrows():
+            user_iid, item_iid = row[['user_iid', 'item_iid']]
+            self.queried_NM[user_iid, item_iid] = 1
     
     def generate_queries(self, model):
         
