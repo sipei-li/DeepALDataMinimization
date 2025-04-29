@@ -16,7 +16,7 @@ from utils import separate_by_gender
 
 class BaseActiveLearner:
 
-    def __init__(self, model, model_hparams, tr_df, te_df, n_users, n_items, q=10, seed=42):
+    def __init__(self, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42):
         """Initialize the active learner.
         
         Parameters:
@@ -53,6 +53,7 @@ class BaseActiveLearner:
         self.te_df = te_df 
         self.n_users = n_users 
         self.n_items = n_items 
+        self.iid_to_gender = iid_to_gender
         self.q = q 
 
         self.col_user = 'user_iid'
@@ -64,7 +65,12 @@ class BaseActiveLearner:
         self.kn_df = self.tr_df.groupby('user_iid').sample(frac=0.05, random_state=self.seed)
 
         # initialize the query record (dictionary-of-keys) matrix
-        # self.queried_NM = sp.dok_matrix((self.n_users, self.n_items), dtype=np.float32)
+        self.queried_NM = sp.dok_matrix((self.n_users, self.n_items), dtype=np.int32)
+
+        # update the query record matrix with the initial known set
+        for _, row in self.kn_df.iterrows():
+            user_iid, item_iid = row[['user_iid', 'item_iid']]
+            self.queried_NM[user_iid, item_iid] = 1
     
     def generate_queries(self, model):
         """Generate an array of query items for each user.
@@ -84,7 +90,7 @@ class BaseActiveLearner:
         """
         self.kn_df = pd.concat([self.kn_df, query_df], axis=0).drop_duplicates() 
 
-    def run_epoch(self, iid_to_gender):
+    def run_epoch(self):
         """Run an epoch of the active learning process:
             1. Re-initialize the rec sys model.
             2. Fit the rec sys model on the updated known set.
@@ -107,7 +113,7 @@ class BaseActiveLearner:
         model.fit()
 
         # evaulate this epoch
-        results = self.perform_evaluation(model, top_k=10, iid_to_gender=iid_to_gender)
+        results = self.perform_evaluation(model, top_k=10)
 
         # generate query items
         query_df = self.generate_queries(model)
@@ -119,9 +125,9 @@ class BaseActiveLearner:
 
         
 
-    def perform_evaluation(self, model, top_k, iid_to_gender):
+    def perform_evaluation(self, model, top_k):
         
-        pro_te_df, unpro_te_df = separate_by_gender(self.te_df, iid_to_gender)
+        pro_te_df, unpro_te_df = separate_by_gender(self.te_df, self.iid_to_gender)
         
         pro_topk_scores = model.recommend_k_items(pro_te_df, top_k, remove_seen=True)
         unpro_topk_scores = model.recommend_k_items(unpro_te_df, top_k, remove_seen=True)
@@ -143,20 +149,31 @@ class BaseActiveLearner:
         pro_recall = recall_at_k(pro_te_df, pro_topk_scores, **params)
         unpro_recall = recall_at_k(unpro_te_df, unpro_topk_scores, **params)
 
-        results = {"map": [pro_map, unpro_map],
-                  "ndcg": [pro_ndcg, unpro_ndcg],
-                  "precision": [pro_precision, unpro_precision],
-                  "recall": [pro_recall, unpro_recall],
-                  "percentage": (self.kn_df.shape[0] / self.tr_df.shape[0])}
+        pro_kn_df, unpro_kn_df = separate_by_gender(self.kn_df, self.iid_to_gender)
+        pro_count = pro_kn_df.shape[0]
+        unpro_count = unpro_kn_df.shape[0]
+
+        results = {"map_pro": pro_map,
+                   "map_unpro": unpro_map,
+                   "ndcg_pro": pro_ndcg,
+                   "ndcg_unpro": unpro_ndcg,
+                   "precision_pro": pro_precision,
+                   "precision_unpro": unpro_precision,
+                   "recall_pro": pro_recall,
+                   "recall_unpro": unpro_recall,
+                   "count_pro": pro_count,
+                   "count_unpro": unpro_count,
+                   "percentage": (self.kn_df.shape[0]/ self.tr_df.shape[0]),
+        }
 
         return results
 
 
 class RatingBasedActiveLearner(BaseActiveLearner):
 
-    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, q=10, seed=42):
+    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42):
 
-        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, q, seed)
+        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed)
         
         avail_strategies = ['MaxRating', 'MinRating', 'MixRating', 'Random']
         if strategy not in avail_strategies:
@@ -176,56 +193,86 @@ class RatingBasedActiveLearner(BaseActiveLearner):
 
         for user_iid in user_iids_N:
             
-            # user ratings
-            user_tr_df = self.tr_df[self.tr_df['user_iid'] == user_iid]
+            # # user training set
+            # user_tr_df = self.tr_df[self.tr_df['user_iid'] == user_iid]
 
-            # filter the already rated items or the know ratings
-            rated_bef_df = self.kn_df[self.kn_df['user_iid'] == user_iid]
+            # # filter the known ratings
+            # rated_bef_df = self.kn_df[self.kn_df['user_iid'] == user_iid]
+            
+            # # remove the known ratings from the user training set
+            # # `keep=False` means that we delete all occurrences of the same row
+            # user_tr_df = pd.concat([user_tr_df, rated_bef_df]).drop_duplicates(ignore_index=True, keep=False)
+             
+            # if user_tr_df.shape[0] == 0:
+            #     # if we don't have any training data left for this user, skip
+            #     continue 
 
-            # remove the known ratings from the user ratings
-            # `keep=False` means that delete all occurrences of the same row
-            user_tr_df = pd.concat([user_tr_df, rated_bef_df]).drop_duplicates(ignore_index=True, keep=False)
+            # items queried before
+            queried_bef_items = np.argwhere(self.queried_NM[user_iid, :] > 0)[:, 1]
+            
+            if len(queried_bef_items) == self.n_items:
+                continue
 
-            if user_tr_df.shape[0] == 0:
-                # if we don't have any candidate ratings for this user, skip
-                continue 
+            # candidate set - all items
+            user_df = pd.DataFrame(
+                {
+                    'item_iid': np.arange(self.n_items),
+                    'rating_estimate': rating_preds_NM[user_iid, :],
+                }
+            )
+            
+            # remove the items that have been queried before from candidate set
+            user_df = user_df[~user_df['item_iid'].isin(queried_bef_items)]
 
             # get the items to make predictions
-            item_iids_M = user_tr_df['item_iid'].to_numpy()
+            # item_iids_M = user_tr_df['item_iid'].to_numpy()
 
-            preds_M = [rating_preds_NM[user_iid, item_iid] for item_iid in item_iids_M]
-            preds_M = np.array(preds_M)
+            # preds_M = [rating_preds_NM[user_iid, item_iid] for item_iid in item_iids_M]
+            # preds_M = np.array(preds_M)
 
             # assign a new column
-            user_tr_df['rating_estimate'] = preds_M 
+            # user_tr_df['rating_estimate'] = preds_M 
 
             if self.strategy == "MaxRating":
-                user_tr_df_sorted = user_tr_df.sort_values(by='rating_estimate', ascending=False)
+                user_df_sorted = user_df.sort_values(by='rating_estimate', ascending=False)
             
             elif self.strategy == "MinRating":
-                user_tr_df_sorted = user_tr_df.sort_values(by='rating_estimate', ascending=True)
+                user_df_sorted = user_df.sort_values(by='rating_estimate', ascending=True)
             
             elif self.strategy == "MixRating":
                 if self.q % 2 != 0:
                     raise ValueError("To use MixRating strategy, choose a query list size (`q`) that is divisable by 2.")
                 k = self.q // 2
-                high_df = user_tr_df.sort_values(by='rating_estimate', ascending=False)
-                low_df = user_tr_df.sort_values(by='rating_estimate', ascending=True)
+                high_df = user_df.sort_values(by='rating_estimate', ascending=False)
+                low_df = user_df.sort_values(by='rating_estimate', ascending=True)
 
-                user_tr_df_sorted = pd.concat([high_df[:k], low_df[:k]])
+                user_df_sorted = pd.concat([high_df[:k], low_df[:k]])
             
             elif self.strategy == "Random":
                 # random choice from the candidate pool,
                 # if the size of dataframe is smaller than k, return all
-                if len(user_tr_df) >= self.q:
-                    user_tr_df_sorted = user_tr_df.sample(self.q)
+                if len(user_df) >= self.q:
+                    user_df_sorted = user_df.sample(self.q)
                 else:
-                    user_tr_df_sorted = user_tr_df 
+                    user_df_sorted = user_df 
             
             else:
                 raise ValueError("Strategy must be one of: 'MaxRating', 'MinRating', 'MixRating', or 'Random'.")
             
-            query_df.append(user_tr_df_sorted.iloc[:self.q][['user_iid', 'item_iid', 'rating']])
+            # keep the top q items
+            query_items = user_df_sorted.iloc[:self.q]['item_iid'].to_list()
+            
+            # update query record matrix
+            for item_iid in query_items:
+                self.queried_NM[user_iid, item_iid] = 1
+            
+            # user training set
+            user_tr_df = self.tr_df[self.tr_df['user_iid'] == user_iid]
+
+            # query items from training set that are in the top q
+            user_query_df = user_tr_df[user_tr_df['item_iid'].isin(query_items)]
+            
+            query_df.append(user_query_df[['user_iid', 'item_iid', 'rating']])
         
         query_df = pd.concat(query_df, axis=0)
 
@@ -233,20 +280,44 @@ class RatingBasedActiveLearner(BaseActiveLearner):
 
 class NonpersonalizedActiveLearner(BaseActiveLearner):
 
-    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, q=10, seed=42):
+    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42):
 
-        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, q, seed)
+        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed)
         
         avail_strategies = ['pop', 'var', 'popvar', 'ge', 'ran']
         if strategy not in avail_strategies:
             raise ValueError("Strategy must be one of: 'pop', 'var', 'popvar', 'ge', or 'ran'.")
         else:
             self.strategy = strategy 
+        
+        self.initialize_iters()
     
     def generate_queries(self, model):
-        pass
+        chosen_is = self.sorted_i[self.i_indx:self.i_indx+self.q]
+        query_df = self.tr_df[self.tr_df['item_iid'].isin(chosen_is)]
 
-    def _generate_queries_pop(self):
+        self.i_indx += self.q
+        return query_df
+    
+    def initialize_iters(self):
+        if self.strategy == 'ran':
+            self.sorted_i = random.sample(range(self.n_items), self.n_items)
+        else:
+            if self.strategy == 'pop':
+                iter_df = self._generate_iters_pop()
+            elif self.strategy == 'var':
+                iter_df = self._generate_iters_var()
+            elif self.strategy == 'popvar':
+                iter_df = self._generate_iters_popvar()
+            elif self.strategy == 'ge':
+                # TODO
+                raise NotImplementedError
+
+            self.sorted_i = iter_df['item_iid'].tolist()
+        
+        self.i_indx = 0
+        
+    def _generate_iters_pop(self):
         """Popularity: select the most popular items in the candidate set."""
         
         item_pop_df = (self.tr_df.groupby('item_iid')['rating'].count()
@@ -257,7 +328,7 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
         
         return item_pop_df
     
-    def _generate_queries_var(self):
+    def _generate_iters_var(self):
         """Variance: select the items with highest variance."""
 
         item_var_df = (self.tr_df.groupby('item_iid')['rating'].var(ddof=0)
@@ -265,7 +336,7 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
         
         return item_var_df 
     
-    def _generate_queries_popvar(self):
+    def _generate_iters_popvar(self):
 
         """Popularity * Variance: normalized popularity times variance."""
         item_pop_df = self._generate_queries_pop()
@@ -280,9 +351,57 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
         item_popvar_df = item_popvar_df.sort_values(by='pop_var', ascending=False, ignore_index=True)
 
         return item_popvar_df 
-
-
-
+    
+    def _generate_iters_ge(self):
         
+        # fit the oracle on the whole training set
+        oracle = self.model(self.model_hparams, self.tr_df, self.te_df, self.n_users, self.n_items, self.seed)
+        oracle.fit()
+        top_k_scores_oracle = oracle.recommend_k_items(self.te_df, 10, remove_seen=True)
+
+        def retrain_without(item_iid):
+            tr_filt = self.tr_df[self.tr_df['item_iid'] != item_iid]
+            temp_model = self.model(self.model_hparams, tr_filt, self.te_df, self.n_users, self.n_items, self.seed)
+            temp_model.fit()
+
+            top_k_scores_temp = temp_model.recommend_k_items(self.te_df, 10, remove_seen=True)
 
     
+class kNNActiveLearner(BaseActiveLearner):
+
+    def __init__(self, 
+                 model, 
+                 model_hparams, 
+                 tr_df, 
+                 te_df, 
+                 n_users, 
+                 n_items, 
+                 iid_to_gender, 
+                 q=10, 
+                 seed=42):
+        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed)
+
+    def generate_queries(self, model):
+        
+        user_iids_N = np.arange(self.n_users)
+
+        query_df = []
+
+        for user_iid in user_iids_N:
+
+            # user ratings - candidate set
+            user_tr_df = self.tr_df[self.tr_df['user_iid'] == user_iid]
+
+            # filter the already rated items or the known ratings
+            rated_bef_df = self.kn_df[self.kn_df['user_iid'] == user_iid]
+
+            # remove the known ratings from the candidate set
+            # `keep=False` means that we delete all occurrences of the same row
+            user_tr_df = pd.concat([user_tr_df, rated_bef_df]).drop_duplicates(ignore_index=True, keep=False)
+
+            if user_tr_df.shape[0] == 0:
+                # if we don't have any candidate ratings left for this user, skip
+                continue 
+
+    def update_item_sim_mat(self):
+        item_user_mat = self.tr_df

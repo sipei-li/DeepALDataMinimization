@@ -278,7 +278,7 @@ class LightGCNRecommender(tf.keras.Model):
 
         if remove_seen:
             test_scores += self.R.tocsr()[user_ids, :] * -np.inf 
-        return test_scores
+        return np.asarray(test_scores)
 
     def recommend_k_items(self, te_df, top_k=10, sort_top_k=True, remove_seen=True):
         """Recommend top K items for all users in the test set.
