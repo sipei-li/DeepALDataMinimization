@@ -192,20 +192,6 @@ class RatingBasedActiveLearner(BaseActiveLearner):
         query_df = []
 
         for user_iid in user_iids_N:
-            
-            # # user training set
-            # user_tr_df = self.tr_df[self.tr_df['user_iid'] == user_iid]
-
-            # # filter the known ratings
-            # rated_bef_df = self.kn_df[self.kn_df['user_iid'] == user_iid]
-            
-            # # remove the known ratings from the user training set
-            # # `keep=False` means that we delete all occurrences of the same row
-            # user_tr_df = pd.concat([user_tr_df, rated_bef_df]).drop_duplicates(ignore_index=True, keep=False)
-             
-            # if user_tr_df.shape[0] == 0:
-            #     # if we don't have any training data left for this user, skip
-            #     continue 
 
             # items queried before
             queried_bef_items = np.argwhere(self.queried_NM[user_iid, :] > 0)[:, 1]
@@ -223,15 +209,6 @@ class RatingBasedActiveLearner(BaseActiveLearner):
             
             # remove the items that have been queried before from candidate set
             user_df = user_df[~user_df['item_iid'].isin(queried_bef_items)]
-
-            # get the items to make predictions
-            # item_iids_M = user_tr_df['item_iid'].to_numpy()
-
-            # preds_M = [rating_preds_NM[user_iid, item_iid] for item_iid in item_iids_M]
-            # preds_M = np.array(preds_M)
-
-            # assign a new column
-            # user_tr_df['rating_estimate'] = preds_M 
 
             if self.strategy == "MaxRating":
                 user_df_sorted = user_df.sort_values(by='rating_estimate', ascending=False)
