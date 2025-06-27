@@ -184,12 +184,16 @@ class LightGCNRecommender(tf.keras.Model):
                 if neg_id not in x:
                     return neg_id  
 
-        indices = range(self.n_users)
-        if self.n_users < batch_size:
+        # indices = range(self.n_users)
+        indices = range(self.interact_status.shape[0])
+
+        # if self.n_users < batch_size:
+        if self.interact_status.shape[0] < batch_size:
             users = [random.choice(indices) for _ in range(batch_size)]
         else:
             users = random.sample(indices, batch_size)
         
+
         interact = self.interact_status.iloc[users]
         pos_items = interact[self.col_item + "_interacted"].apply(
             lambda x: random.choice(list(x))

@@ -12,14 +12,14 @@ from recommenders.evaluation.python_evaluation import (
     recall_at_k,
 )
 
-from utils import separate_by_gender
+from utils import separate_by_gender, ratio_sample_by_gender, oversample_pro
 
 class BaseActiveLearner:
 
-    def __init__(self, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42):
+    def __init__(self, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42, oversample=False, ratio=None):
         """Initialize the active learner.
         
-        Parameters:
+        Args:
             model: tf.keras.Model
                 The base recommender system used by the active learner.
 
@@ -40,6 +40,12 @@ class BaseActiveLearner:
 
             q: int
                 The query list size. 
+            
+            oversample: bool
+                Whether we are doing oversampling for female users.
+
+            ratio: float
+                Ratio of number of ratings collected at each epoch from female and male users.
         """
 
         tf.random.set_seed(seed)
@@ -56,6 +62,10 @@ class BaseActiveLearner:
         self.iid_to_gender = iid_to_gender
         self.q = q 
 
+        # experiment settings
+        self.oversample = oversample
+        self.ratio = ratio
+        
         self.col_user = 'user_iid'
         self.col_item = 'item_iid'
         self.col_rating = 'rating'
@@ -63,6 +73,7 @@ class BaseActiveLearner:
 
         # initialize the known set with 5% of each user
         self.kn_df = self.tr_df.groupby('user_iid').sample(frac=0.05, random_state=self.seed)
+
     
     def generate_queries(self, model):
         """Generate an array of query items for each user.
@@ -76,7 +87,7 @@ class BaseActiveLearner:
     def update_known(self, query_df):
         """Update the known set.
         
-        Parameters:
+        Args:
             query_df: pd.DataFrame
                 Queried ratings to be added to the known set.
         """
@@ -90,7 +101,7 @@ class BaseActiveLearner:
             4. Generate the items to be queried.
             5. Update the known set.
         
-            Parameters:
+            Args:
                 iid_to_gender: dict
                     A dictionary that maps `user_iid` to gender, required for Female/Male performance comparison.
             
@@ -163,13 +174,13 @@ class BaseActiveLearner:
 
 class RatingBasedActiveLearner(BaseActiveLearner):
 
-    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42):
+    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42, oversample=False, ratio=None):
 
-        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed)
+        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed, oversample, ratio)
         
         avail_strategies = ['MaxRating', 'MinRating', 'MixRating', 'Random']
         if strategy not in avail_strategies:
-            raise ValueError("Strategy must be one of: 'MaxRating', 'MinRating', 'MixRating', or 'Random'.")
+            raise ValueError("Strategy must be one of:", avail_strategies)
         else:
             self.strategy = strategy 
         
@@ -180,7 +191,14 @@ class RatingBasedActiveLearner(BaseActiveLearner):
         for _, row in self.kn_df.iterrows():
             user_iid, item_iid = row[['user_iid', 'item_iid']]
             self.queried_NM[user_iid, item_iid] = 1
-    
+        
+        if self.oversample:
+            # oversample the female data in the initial known set
+            self.kn_df = oversample_pro(self.kn_df, self.iid_to_gender, random_state=self.seed)
+        elif self.ratio:
+            # ratio sample the initial known set
+            self.kn_df = ratio_sample_by_gender(self.kn_df, self.ratio, self.iid_to_gender, random_state=self.seed)
+
     def generate_queries(self, model):
         
         user_iids_N = np.arange(self.n_users)
@@ -253,6 +271,11 @@ class RatingBasedActiveLearner(BaseActiveLearner):
         
         query_df = pd.concat(query_df, axis=0)
 
+        if self.oversample:
+            query_df = oversample_pro(query_df, self.iid_to_gender, random_state=self.seed)
+        elif self.ratio:
+            query_df = ratio_sample_by_gender(query_df, self.ratio, self.iid_to_gender, random_state=self.seed)
+
         return query_df
 
 class NonpersonalizedActiveLearner(BaseActiveLearner):
@@ -263,7 +286,7 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
         
         avail_strategies = ['pop', 'var', 'popvar', 'ge', 'ran']
         if strategy not in avail_strategies:
-            raise ValueError("Strategy must be one of: 'pop', 'var', 'popvar', 'ge', or 'ran'.")
+            raise ValueError("Strategy must be one of:", avail_strategies)
         else:
             self.strategy = strategy 
         
@@ -287,8 +310,7 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
             elif self.strategy == 'popvar':
                 iter_df = self._generate_iters_popvar()
             elif self.strategy == 'ge':
-                # TODO
-                raise NotImplementedError
+                iter_df = self._generate_iters_ge(k=10)
 
             self.sorted_i = iter_df['item_iid'].tolist()
         
@@ -329,19 +351,59 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
 
         return item_popvar_df 
     
-    def _generate_iters_ge(self):
+    def _generate_iters_ge(self, k):
+        """Greedy Extend.
+        
+        Args:
+            k: int
+                Number of top k items when calculating precision@k.
+            
+        Returns:
+            pd.DataFrame
+                Dataframe with columns ['item_iid', 'precision_wo', 'precision_gain'], 
+                sorted by 'precision_gain'.
+        """
         
         # fit the oracle on the whole training set
         oracle = self.model(self.model_hparams, self.tr_df, self.te_df, self.n_users, self.n_items, self.seed)
         oracle.fit()
-        top_k_scores_oracle = oracle.recommend_k_items(self.te_df, 10, remove_seen=True)
+        oracle_top_k_scores = oracle.recommend_k_items(self.te_df, 10, remove_seen=True)
+        oracle_precision_at_k = precision_at_k(self.te_df,
+                                               oracle_top_k_scores,
+                                               k=10,
+                                               col_user=self.col_user,
+                                               col_item=self.col_item,
+                                               col_prediction=self.col_prediction
+                                               )
 
         def retrain_without(item_iid):
             tr_filt = self.tr_df[self.tr_df['item_iid'] != item_iid]
             temp_model = self.model(self.model_hparams, tr_filt, self.te_df, self.n_users, self.n_items, self.seed)
             temp_model.fit()
 
-            top_k_scores_temp = temp_model.recommend_k_items(self.te_df, 10, remove_seen=True)
+            temp_top_k_scores = temp_model.recommend_k_items(self.te_df, 10, remove_seen=True)
+            
+            # we are using precision at k for calculating the gain for each item
+            # should we use a different metric?
+            temp_precision_at_k = precision_at_k(self.te_df, 
+                                                 temp_top_k_scores, 
+                                                 k=10, 
+                                                 col_user=self.col_user, 
+                                                 col_item=self.col_item,
+                                                 col_prediction=self.col_prediction
+                                                 )
+            return [item_iid, temp_precision_at_k]
+
+        results = []
+        for item_iid in range(self.n_items):
+            results.append(retrain_without(item_iid))
+        
+        item_ge_df = pd.DataFrame(results, columns=['item_iid', 'precision_wo'])
+        item_ge_df['precision_gain'] = oracle_precision_at_k - item_ge_df['precision_wo']
+        item_ge_df = item_ge_df.sort_values(by='precision_gain', ascending=False, ignore_index=True)
+
+        return item_ge_df 
+
 
     
 class kNNActiveLearner(BaseActiveLearner):

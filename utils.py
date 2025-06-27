@@ -89,8 +89,8 @@ def user_fixed_train_test_split(df, test_size=0.2, random_state=42):
 def separate_by_gender(df, iid_to_gender):
     """Separate a data frame by female and male users.
     
-    Parameters:
-        preds: pd.DataFrame
+    Args:
+        df: pd.DataFrame
             Data frame with at least the column 'user_iid'.
 
         iid_to_gender: dict
@@ -109,3 +109,74 @@ def separate_by_gender(df, iid_to_gender):
     unpro_preds = df[df['gender'] != 'F']
 
     return pro_preds.drop(columns='gender'), unpro_preds.drop(columns='gender')
+
+def ratio_sample_by_gender(df, ratio, iid_to_gender, random_state):
+    """Count the number of rows in a data frame from female and male users 
+    and sample rows to make sure of equal proportions.
+    
+    Args:
+        df: pd.DataFrame
+            Data Frame with at least the column 'user_iid'.
+
+        ratio: float
+            Ratio of data size from male users to data size from female users.
+        
+        iid_to_gender: dict
+            Dictionary that maps user inner index to gender.
+            Keys are user inner indices, and values are "F" or "M".
+        
+        random_state: int
+            Random seed used in sampling.    
+    
+    Returns:
+        pd.DataFrame: Sampled data frame that has the same number of 
+        rows from female and male users.
+    """
+    pro_df, unpro_df = separate_by_gender(df, iid_to_gender)
+
+    pro_count, unpro_count = pro_df.shape[0], unpro_df.shape[0]
+
+    original_ratio = pro_count / unpro_count 
+
+    if ratio >= original_ratio:
+        # sample unprotected group
+        unpro_df = unpro_df.sample(frac=(original_ratio/ratio), replace=False, random_state=random_state, ignore_index=True)
+    else:
+        # sample protected group
+        pro_df = pro_df.sample(frac=(ratio/original_ratio), replace=False, random_state=random_state, ignore_index=True)
+    
+    return pd.concat([pro_df, unpro_df], axis=0, ignore_index=True)
+
+def oversample_pro(df, iid_to_gender, random_state):
+    """Count the number of rows in a data frame from female and male users 
+    and oversample female data to match the size of male data.
+    
+    Args:
+        df: pd.DataFrame
+            Data Frame with at least the column 'user_iid'.
+        
+        iid_to_gender: dict
+            Dictionary that maps user inner index to gender.
+            Keys are user inner indices, and values are "F" or "M".
+        
+        random_state: int
+            Random seed used in sampling.    
+    
+    Returns:
+        pd.DataFrame: Sampled data frame that has the same number of 
+        rows from female and male users.
+    """
+    pro_df, unpro_df = separate_by_gender(df, iid_to_gender)
+
+    pro_count, unpro_count = pro_df.shape[0], unpro_df.shape[0]
+
+    oversample_count = unpro_count - pro_count
+
+    if oversample_count < 0:
+        raise ValueError("Cannot oversample protected group because the number of data from" \
+        "protected group is more than the number of data from unprotected group.")
+    elif oversample_count == 0:
+        return df
+    else:    
+        sampled_pro_df = pro_df.sample(n=oversample_count, replace=True, random_state=random_state, ignore_index=True)
+        return pd.concat([pro_df, sampled_pro_df, unpro_df], axis=0, ignore_index=True)
