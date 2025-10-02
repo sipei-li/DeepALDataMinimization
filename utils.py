@@ -69,6 +69,21 @@ def nCoreReduction(df, n_core=5):
     return filt_df 
 
 def user_fixed_train_test_split(df, test_size=0.2, random_state=42):
+    """Split a data frame into train and test sets, using 20% of each user's data for test.
+    
+    Args:
+        df: pd.DataFrame
+            Data frame with at least the column 'user_iid'.
+        test_size: float
+            Proportion of data to allocate to the test set.
+        random_state: int
+            Random seed for reproducibility.
+    
+    Returns:
+        pd.DataFrame, pd.DataFrame
+        - Train data frame.
+        - Test data frame.
+    """
 
     train_data = []
     test_data = []

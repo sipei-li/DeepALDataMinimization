@@ -71,7 +71,8 @@ class LightGCNRecommender(tf.keras.Model):
         self._weights = self._init_weights()
 
         # self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
-        self.optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=self.lr)
+        # Create optimizer - will be reinitialized in fit() to avoid state conflicts
+        self.optimizer = None
 
     def _init_train_data(self):
         """Record items interacted with each user in a dataframe self.interact_status, and
@@ -240,6 +241,9 @@ class LightGCNRecommender(tf.keras.Model):
         """Fit the model on `self.tr_df`. If `self.eval_epoch` is not -1, evaluate the model on `self.te_df`
         every `self.eval_epoch` epochs to observe the training status.
         """
+        # Create a fresh optimizer instance to avoid type conflicts when retraining
+        self.optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=self.lr)
+        
         for epoch in range(1, self.epochs + 1):
             loss, mf_loss, emb_loss = 0.0, 0.0, 0.0
             n_batch = self.tr_df.shape[0] // self.batch_size + 1

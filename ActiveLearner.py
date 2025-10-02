@@ -174,7 +174,21 @@ class BaseActiveLearner:
 
 class RatingBasedActiveLearner(BaseActiveLearner):
 
-    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42, oversample=False, ratio=None):
+    def __init__(
+        self, 
+        strategy, 
+        model, 
+        model_hparams, 
+        tr_df, 
+        te_df, 
+        n_users, 
+        n_items, 
+        iid_to_gender, 
+        q=10, 
+        seed=42, 
+        oversample=False, 
+        ratio=None
+    ):
 
         super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed, oversample, ratio)
         
@@ -280,9 +294,23 @@ class RatingBasedActiveLearner(BaseActiveLearner):
 
 class NonpersonalizedActiveLearner(BaseActiveLearner):
 
-    def __init__(self, strategy, model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q=10, seed=42):
+    def __init__(
+        self, 
+        strategy, 
+        model, 
+        model_hparams, 
+        tr_df, 
+        te_df, 
+        n_users, 
+        n_items, 
+        iid_to_gender, 
+        q=10, 
+        seed=42,
+        oversample=False,
+        ratio=None
+    ):
 
-        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed)
+        super().__init__(model, model_hparams, tr_df, te_df, n_users, n_items, iid_to_gender, q, seed, oversample, ratio)
         
         avail_strategies = ['pop', 'var', 'popvar', 'ge', 'ran']
         if strategy not in avail_strategies:
@@ -297,6 +325,12 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
         query_df = self.tr_df[self.tr_df['item_iid'].isin(chosen_is)]
 
         self.i_indx += self.q
+
+        if self.oversample:
+            query_df = oversample_pro(query_df, self.iid_to_gender, random_state=self.seed)
+        elif self.ratio:
+            query_df = ratio_sample_by_gender(query_df, self.ratio, self.iid_to_gender, random_state=self.seed)
+
         return query_df
     
     def initialize_iters(self):
@@ -444,3 +478,4 @@ class kNNActiveLearner(BaseActiveLearner):
 
     def update_item_sim_mat(self):
         item_user_mat = self.tr_df
+        # TODO
