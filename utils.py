@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from sklearn.metrics import roc_auc_score
 
 def get_top_k_scored_items(scores, top_k, sort_top_k=False):
     """Extract top K items from a matrix of scores for each user-item pair, optionally sort results per user.
@@ -195,3 +196,135 @@ def oversample_pro(df, iid_to_gender, random_state):
     else:    
         sampled_pro_df = pro_df.sample(n=oversample_count, replace=True, random_state=random_state, ignore_index=True)
         return pd.concat([pro_df, sampled_pro_df, unpro_df], axis=0, ignore_index=True)
+
+def compute_rmse(model, te_df):
+    """Compute Root Mean Squared Error (RMSE) for a test dataframe using a trained LightGCNRecommender model.
+    
+    Args:
+        model: LightGCNRecommender
+            A trained LightGCNRecommender model from LightGCN.py
+        te_df: pd.DataFrame
+            Test dataframe with columns ['user_iid', 'item_iid', 'rating']
+            - user_iid: user inner ID (integer index)
+            - item_iid: item inner ID (integer index)  
+            - rating: actual rating value
+    
+    Returns:
+        float: Root Mean Squared Error between predicted and actual ratings
+    """
+    # Get unique user IDs from test set
+    user_ids = te_df['user_iid'].unique()
+    
+    # Get predicted scores for all users and items
+    # remove_seen=False ensures we get actual predictions for all items (including seen ones)
+    predicted_scores = np.clip(model.score(user_ids, remove_seen=False), 1, 5)
+    
+    # Create a mapping from user_iid to index in predicted_scores matrix
+    user_id_to_idx = {user_id: idx for idx, user_id in enumerate(user_ids)}
+    
+    # Extract predicted scores for each (user_iid, item_iid) pair in te_df
+    predictions = []
+    actuals = []
+    
+    for _, row in te_df.iterrows():
+        user_iid = row['user_iid']
+        item_iid = row['item_iid']
+        actual_rating = row['rating']
+        
+        # Get the predicted score from the score matrix
+        user_idx = user_id_to_idx[user_iid]
+        predicted_rating = predicted_scores[user_idx, item_iid]
+        
+        predictions.append(predicted_rating)
+        actuals.append(actual_rating)
+    
+    # Compute RMSE
+    predictions = np.array(predictions)
+    actuals = np.array(actuals)
+    rmse = np.sqrt(np.mean((predictions - actuals) ** 2))
+    
+    return rmse
+
+def compute_rocauc(model, te_df):
+    """Compute ROC AUC score for a test dataframe using a trained LightGCNRecommender model.
+    
+    This function evaluates the model's ranking ability by:
+    1. For each user, identifying positive items (items in test set) vs negative items (unseen items)
+    2. Excluding items seen during training from evaluation
+    3. Getting predicted scores for all items
+    4. Computing AUC for each user (how well positives are ranked above negatives)
+    5. Averaging AUC scores across all users
+    
+    Args:
+        model: LightGCNRecommender
+            A trained LightGCNRecommender model from LightGCN.py
+        te_df: pd.DataFrame
+            Test dataframe with columns ['user_iid', 'item_iid', 'rating']
+            - user_iid: user inner ID (integer index)
+            - item_iid: item inner ID (integer index)  
+            - rating: actual rating value
+    
+    Returns:
+        float: Average ROC AUC score across all users (range: 0.0 to 1.0)
+    """
+    # Get unique user IDs from test set
+    user_ids = te_df['user_iid'].unique()
+    
+    # Get predicted scores with training items masked as -inf
+    # Since train-test split ensures no overlap, test items won't be -inf
+    predicted_scores = model.score(user_ids, remove_seen=True)
+    
+    # Create a mapping from user_iid to index in predicted_scores matrix
+    user_id_to_idx = {user_id: idx for idx, user_id in enumerate(user_ids)}
+    
+    # Group test items by user
+    user_to_test_items = te_df.groupby('user_iid')['item_iid'].apply(set).to_dict()
+    
+    # Compute AUC for each user
+    auc_scores = []
+    
+    for user_iid in user_ids:
+        # Get positive items for this user (items in test set)
+        if user_iid not in user_to_test_items:
+            continue
+        
+        positive_items = user_to_test_items[user_iid]
+        user_idx = user_id_to_idx[user_iid]
+        
+        # Identify items to exclude (training items marked as -inf)
+        user_scores = predicted_scores[user_idx, :]
+        train_item_mask = np.isinf(user_scores) & (user_scores < 0)
+        
+        # Create evaluation mask: only evaluate items not in training
+        eval_mask = ~train_item_mask
+        eval_item_indices = np.where(eval_mask)[0]
+        
+        # Skip if no items to evaluate or no positive items
+        if len(eval_item_indices) == 0 or len(positive_items) == 0:
+            continue
+        
+        # Skip if all evaluated items are positive (no negatives to compare)
+        if len(positive_items) == len(eval_item_indices):
+            continue
+        
+        # Create binary labels for evaluated items only
+        # 1 for items in test set, 0 for unseen items (neither in training nor test)
+        labels = np.array([1 if item in positive_items else 0 
+                          for item in eval_item_indices])
+        
+        # Get predicted scores for evaluated items (excluding training items with -inf)
+        user_predictions = user_scores[eval_item_indices] >= 3
+        
+        # Compute AUC for this user
+        try:
+            auc = roc_auc_score(labels, user_predictions)
+            auc_scores.append(auc)
+        except ValueError:
+            # Skip if all labels are the same class
+            continue
+    
+    # Return average AUC across all users
+    if len(auc_scores) == 0:
+        return 0.0
+    
+    return np.mean(auc_scores)

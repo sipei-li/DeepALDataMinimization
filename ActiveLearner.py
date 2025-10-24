@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import scipy.sparse as sp
+import multiprocessing as mp
 
 from recommenders.evaluation.python_evaluation import (
     map_at_k,
@@ -12,7 +13,7 @@ from recommenders.evaluation.python_evaluation import (
     recall_at_k,
 )
 
-from utils import separate_by_gender, ratio_sample_by_gender, oversample_pro
+from utils import separate_by_gender, ratio_sample_by_gender, oversample_pro, compute_rmse, compute_rocauc
 
 class BaseActiveLearner:
 
@@ -152,6 +153,14 @@ class BaseActiveLearner:
         pro_recall = recall_at_k(pro_te_df, pro_topk_scores, **params)
         unpro_recall = recall_at_k(unpro_te_df, unpro_topk_scores, **params)
 
+        # Compute RMSE for protected and unprotected groups
+        pro_rmse = compute_rmse(model, pro_te_df)
+        unpro_rmse = compute_rmse(model, unpro_te_df)
+
+        # Compute ROC AUC for protected and unprotected groups
+        pro_rocauc = compute_rocauc(model, pro_te_df)
+        unpro_rocauc = compute_rocauc(model, unpro_te_df)
+
         pro_kn_df, unpro_kn_df = separate_by_gender(self.kn_df, self.iid_to_gender)
         pro_count = pro_kn_df.shape[0]
         unpro_count = unpro_kn_df.shape[0]
@@ -164,6 +173,10 @@ class BaseActiveLearner:
                    "precision_unpro": unpro_precision,
                    "recall_pro": pro_recall,
                    "recall_unpro": unpro_recall,
+                   "rmse_pro": pro_rmse,
+                   "rmse_unpro": unpro_rmse,
+                   "rocauc_pro": pro_rocauc,
+                   "rocauc_unpro": unpro_rocauc,
                    "count_pro": pro_count,
                    "count_unpro": unpro_count,
                    "percentage": (self.kn_df.shape[0]/ self.tr_df.shape[0]),
@@ -428,9 +441,12 @@ class NonpersonalizedActiveLearner(BaseActiveLearner):
                                                  )
             return [item_iid, temp_precision_at_k]
 
-        results = []
-        for item_iid in range(self.n_items):
-            results.append(retrain_without(item_iid))
+        # results = []
+        # for item_iid in range(self.n_items):
+        #     results.append(retrain_without(item_iid))
+        
+        with mp.Pool(processes=25) as pool:
+            results = pool.map(retrain_without, list(range(self.n_items)))
         
         item_ge_df = pd.DataFrame(results, columns=['item_iid', 'precision_wo'])
         item_ge_df['precision_gain'] = oracle_precision_at_k - item_ge_df['precision_wo']

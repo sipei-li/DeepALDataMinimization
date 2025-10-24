@@ -2,6 +2,7 @@ import random
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+import multiprocessing as mp
 
 from recommenders.evaluation.python_evaluation import (
     map_at_k,
@@ -12,6 +13,57 @@ from recommenders.evaluation.python_evaluation import (
 
 from utils import separate_by_gender
 from ActiveLearner import BaseActiveLearner
+
+
+# Module-level function for multiprocessing (must be picklable)
+def _worker_retrain_without_item(args):
+    """Worker function for multiprocessing that retrains model without a specific item.
+    
+    Args:
+        args: tuple
+            (item_iid, model_class, model_hparams, tr_df, te_df, n_users, n_items, seed, 
+             oracle_k, fairness_metric, iid_to_gender, col_user, col_item, col_prediction)
+    
+    Returns:
+        list: [item_iid, fairness_gap_without_item]
+    """
+    (item_iid, model_class, model_hparams, tr_df, te_df, n_users, n_items, seed, 
+     oracle_k, fairness_metric, iid_to_gender, col_user, col_item, col_prediction) = args
+    
+    # Remove all ratings for this specific item from training data
+    tr_filt = tr_df[tr_df['item_iid'] != item_iid]
+    
+    # Create a new model instance
+    temp_model = model_class(model_hparams, tr_filt, te_df, n_users, n_items, seed)
+    temp_model.fit()
+    
+    temp_top_k_scores = temp_model.recommend_k_items(te_df, oracle_k, remove_seen=True)
+    
+    # Calculate fairness gap
+    pro_te_df, unpro_te_df = separate_by_gender(te_df, iid_to_gender)
+    pro_topk_scores, unpro_topk_scores = separate_by_gender(temp_top_k_scores, iid_to_gender)
+    
+    params = {
+        'k': oracle_k,
+        'col_user': col_user,
+        'col_item': col_item,
+        'col_prediction': col_prediction
+    }
+    
+    # Calculate the specified metric for both groups
+    if fairness_metric == 'precision':
+        pro_metric = precision_at_k(pro_te_df, pro_topk_scores, **params)
+        unpro_metric = precision_at_k(unpro_te_df, unpro_topk_scores, **params)
+    elif fairness_metric == 'recall':
+        pro_metric = recall_at_k(pro_te_df, pro_topk_scores, **params)
+        unpro_metric = recall_at_k(unpro_te_df, unpro_topk_scores, **params)
+    elif fairness_metric == 'ndcg':
+        pro_metric = ndcg_at_k(pro_te_df, pro_topk_scores, **params)
+        unpro_metric = ndcg_at_k(unpro_te_df, unpro_topk_scores, **params)
+    
+    temp_fairness_gap = abs(pro_metric - unpro_metric)
+    
+    return [item_iid, temp_fairness_gap]
 
 
 class FairnessExtendActiveLearner(BaseActiveLearner):
@@ -63,17 +115,26 @@ class FairnessExtendActiveLearner(BaseActiveLearner):
         for _, row in self.kn_df.iterrows():
             user_iid, item_iid = row[['user_iid', 'item_iid']]
             self.queried_NM[user_iid, item_iid] = 1
+        
+        # Initialize item ordering based on fairness (computed once on tr_df)
+        self.initialize_iters()
+    
+    def initialize_iters(self):
+        """Initialize the item ordering based on fairness gain.
+        
+        This method computes the fairness ordering once on the full training set,
+        similar to the greedy extend oracle approach.
+        """
+        iter_df = self._generate_iters_fairness(k=20)
+        self.sorted_i = iter_df['item_iid'].tolist()
+        self.i_indx = 0
 
     def generate_queries(self, model):
-        """Generate queries by selecting items based on current fairness ordering.
+        """Generate queries by selecting items based on pre-computed fairness ordering.
         
-        This method recalculates the fairness ordering each time it's called,
-        ensuring that the active learner adapts to the current model state.
+        This method uses a pre-computed fairness ordering (calculated once on tr_df)
+        and selects items for each user from this fixed ordering.
         """
-        # Recalculate fairness ordering based on current model
-        iter_df = self._generate_iters_fairness(model, k=20)
-        sorted_fairness_items = iter_df['item_iid'].tolist()
-        
         user_iids_N = np.arange(self.n_users)
         query_df = []
         
@@ -85,7 +146,7 @@ class FairnessExtendActiveLearner(BaseActiveLearner):
                 continue
             
             # Find items in fairness order that haven't been queried for this user
-            available_items = [item_iid for item_iid in sorted_fairness_items 
+            available_items = [item_iid for item_iid in self.sorted_i 
                              if item_iid not in queried_bef_items]
             
             if not available_items:
@@ -113,16 +174,14 @@ class FairnessExtendActiveLearner(BaseActiveLearner):
             # Return empty dataframe with correct columns if no queries available
             return pd.DataFrame(columns=['user_iid', 'item_iid', 'rating'])
 
-    def _generate_iters_fairness(self, current_model, k):
-        """Batch-based Fairness Extend.
+    def _generate_iters_fairness(self, k):
+        """Item-based Fairness Extend (Oracle approach).
         
-        Instead of calculating fairness gain for each item individually, this method
-        processes items in batches of size self.q. Items within each batch are 
-        randomly sampled and assigned the same fairness gain score.
+        Calculates fairness gain for each item by training an oracle model on the full
+        training set, then retraining without each item and comparing fairness gaps.
+        This is computed once during initialization.
         
         Args:
-            current_model: fitted model
-                The currently fitted model to use as baseline.
             k: int
                 Number of top k items when calculating metrics.
             
@@ -132,70 +191,26 @@ class FairnessExtendActiveLearner(BaseActiveLearner):
                 sorted by 'fairness_gain' in descending order.
         """
         
-        # Use the current model as baseline
-        current_top_k_scores = current_model.recommend_k_items(self.te_df, k, remove_seen=True)
-        current_fairness_gap = self._calculate_fairness_gap(self.te_df, current_top_k_scores, k)
+        # Fit the oracle model on the whole training set
+        oracle = self.model(self.model_hparams, self.tr_df, self.te_df, self.n_users, self.n_items, self.seed)
+        oracle.fit()
+        oracle_top_k_scores = oracle.recommend_k_items(self.te_df, k, remove_seen=True)
+        oracle_fairness_gap = self._calculate_fairness_gap(self.te_df, oracle_top_k_scores, k)
 
-        def retrain_without_batch(item_batch):
-            """Retrain model without a batch of items and calculate fairness gap."""
-            # Remove all items in the batch from current known data
-            kn_filt = self.kn_df[~self.kn_df['item_iid'].isin(item_batch)]
-            
-            # Check if filtered data is sufficient for training
-            if kn_filt.empty or len(kn_filt) < 10:  # Minimum threshold for meaningful training
-                # Return current fairness gap if no meaningful data remains
-                return current_fairness_gap
-            
-            # Check if we have interactions for at least some users
-            unique_users = kn_filt['user_iid'].nunique()
-            if unique_users < 2:  # Need at least 2 users for meaningful training
-                return current_fairness_gap
-            
-            # Create a new model instance with isolated TensorFlow state
-            # Use a unique seed based on the batch to ensure reproducibility
-            batch_seed = self.seed + hash(tuple(sorted(item_batch))) % 10000
-            temp_model = self.model(self.model_hparams, kn_filt, self.te_df, self.n_users, self.n_items, batch_seed)
-            temp_model.fit()
-
-            temp_top_k_scores = temp_model.recommend_k_items(self.te_df, k, remove_seen=True)
-            temp_fairness_gap = self._calculate_fairness_gap(self.te_df, temp_top_k_scores, k)
-            
-            return temp_fairness_gap
-
-        # Get items that exist in the current known set
-        # known_items = list(self.kn_df['item_iid'].unique())
-        # All items
-        all_items = list(range(self.n_items))
+        # Prepare arguments for each worker process
+        worker_args = [
+            (item_iid, self.model, self.model_hparams, self.tr_df, self.te_df, 
+             self.n_users, self.n_items, self.seed, k, self.fairness_metric, 
+             self.iid_to_gender, self.col_user, self.col_item, self.col_prediction)
+            for item_iid in range(self.n_items)
+        ]
         
-        # Shuffle items to introduce randomness
-        # random.shuffle(known_items)
-        random.shuffle(all_items)
+        # Calculate fairness gain for all items using multiprocessing
+        with mp.Pool(processes=25) as pool:
+            results = pool.map(_worker_retrain_without_item, worker_args)
         
-        # Create batches of size self.q
-        # batches = []
-        # for i in range(0, len(known_items), self.q):
-        #     batch = known_items[i:i + self.q]
-        #     batches.append(batch)
-        batches = []
-        for i in range(0, len(all_items), self.q):
-            batch = all_items[i:i + self.q]
-            batches.append(batch)
-        
-        # Calculate fairness gain for each batch
-        results = []
-        for batch_idx, item_batch in enumerate(batches):
-            # Calculate fairness gap when this batch is removed
-            batch_fairness_gap = retrain_without_batch(item_batch)
-            batch_fairness_gain = current_fairness_gap - batch_fairness_gap
-            
-            # Assign the same fairness gain to all items in the batch
-            # but add small random noise to create ordering within batch
-            for item_iid in item_batch:
-                # Add small random noise to break ties within batch
-                noise = random.uniform(-0.001, 0.001)
-                results.append([item_iid, batch_fairness_gap, batch_fairness_gain + noise])
-        
-        item_fairness_df = pd.DataFrame(results, columns=['item_iid', 'fairness_wo', 'fairness_gain'])
+        item_fairness_df = pd.DataFrame(results, columns=['item_iid', 'fairness_wo'])
+        item_fairness_df['fairness_gain'] = oracle_fairness_gap - item_fairness_df['fairness_wo']
         
         # Sort by fairness gain (higher gain = more important to include)
         item_fairness_df = item_fairness_df.sort_values(by='fairness_gain', ascending=False, ignore_index=True)
