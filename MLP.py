@@ -2,7 +2,10 @@ import random
 
 import numpy as np
 import tensorflow as tf
+import pandas as pd
 import scipy.sparse as sp
+
+from utils import get_top_k_scored_items
 
 class NCF(tf.keras.Model):
 
@@ -74,11 +77,61 @@ class NCF(tf.keras.Model):
         self._init_train_data()
         
     def _init_train_data(self):
-        """Record items interacted with each user and create adjacency matrix self.R."""
+        """Record items interacted with each user in a dataframe self.interact_status, and
+        create adjacency matrix self.R."""
+        
+        self.interact_status = (
+            self.tr_df.groupby(self.col_user)[self.col_item]
+            .apply(set)
+            .reset_index()
+            .rename(columns={self.col_item: self.col_item + "_interacted"})
+        )
         
         self.R = sp.dok_matrix((self.n_users, self.n_items), dtype=np.float32)
         self.R[self.tr_df[self.col_user], self.tr_df[self.col_item]] = 1.0
 
+    
+    def train_loader(self, batch_size):
+        """
+        Sample train data for every batch. One positive item and one negative item sampled for each user.
+
+        Args:
+            batch_size: int, Batch size of users.
+        
+        Returns:
+            numpy.ndarray, numpy.ndarray, numpy.ndarray:
+            - Sampled users.
+            - Sampled positive items.
+            - Sampled negative items.
+        """
+        def sample_neg(x):
+            if len(x) >= self.n_items:
+                raise ValueError("A user has voted in every item. Can't find a negative sample.")
+            while True:
+                neg_id = random.randint(0, self.n_items - 1)
+                if neg_id not in x:
+                    return neg_id  
+        
+        # indices = range(self.n_users)
+        indices = range(self.interact_status.shape[0])
+
+        # if self.n_users < batch_size:
+        if self.interact_status.shape[0] < batch_size:
+            users = [random.choice(indices) for _ in range(batch_size)]
+        else:
+            users = random.sample(indices, batch_size)
+        
+
+        interact = self.interact_status.iloc[users]
+        pos_items = interact[self.col_item + "_interacted"].apply(
+            lambda x: random.choice(list(x))
+        )
+        neg_items = interact[self.col_item + "_interacted"].apply(
+            lambda x: sample_neg(x)
+        )
+
+        return np.array(users), np.array(pos_items), np.array(neg_items)
+    
     def call(self, inputs):
         user_input, item_input = inputs 
         
@@ -103,29 +156,51 @@ class NCF(tf.keras.Model):
             output = self.predict_layer(neumf_vector)
         return output 
     
-    def fit(self, train_data):
+    
+    def fit(self):
         """
-        Train the NCF model.
-
-        Args:
-            train_data (tf.data.Dataset or generator): ((user_batch, item_batch), label_batch)
+        Train the NCF model using positive and negative sampling.
+        
+        For each batch, samples users, positive items (items users interacted with),
+        and negative items (items users didn't interact with), then trains using BCE loss.
         """
-        # optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=self.learning_rate)
         loss_fn = tf.keras.losses.BinaryCrossentropy()
+        
+        # Calculate number of batches per epoch based on training data size
+        n_batch = int(np.ceil(len(self.tr_df) / self.batch_size))
 
         for epoch in range(1, self.epochs+1):
             total_loss = 0.0
             num_batches = 0
-            for (user_batch, item_batch), label_batch in train_data:
+            
+            for _ in range(n_batch):
+                # Sample users, positive items, and negative items
+                users, pos_items, neg_items = self.train_loader(self.batch_size)
+                
+                # Combine positive and negative samples
+                # Each user appears twice: once with positive item, once with negative item
+                user_batch = np.concatenate([users, users])
+                item_batch = np.concatenate([pos_items, neg_items])
+                # Labels: 1 for positive samples, 0 for negative samples
+                label_batch = np.concatenate([np.ones(len(users)), np.zeros(len(users))])
+                
+                # Convert to tensors
+                user_batch = tf.convert_to_tensor(user_batch, dtype=tf.int32)
+                item_batch = tf.convert_to_tensor(item_batch, dtype=tf.int32)
+                label_batch = tf.convert_to_tensor(label_batch, dtype=tf.float32)
+                
                 with tf.GradientTape() as tape:
                     preds = self((user_batch, item_batch), training=True)
+                    preds = tf.squeeze(preds)  # Remove extra dimension for BCE loss
                     loss = loss_fn(label_batch, preds)
+                
                 grads = tape.gradient(loss, self.trainable_variables)
                 optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
                 total_loss += loss.numpy()
                 num_batches += 1
+                
             if self.verbose and epoch % self.verbose == 0:
                 print(f"Epoch {epoch}: Loss = {(total_loss / num_batches):.4f}")
     
@@ -195,9 +270,6 @@ class NCF(tf.keras.Model):
         Returns:
             pandas.DataFrame, top k recommendation items for each user
         """
-        from utils import get_top_k_scored_items
-        import pandas as pd
-        
         user_ids = np.array(te_df[self.col_user].unique())
         
         test_scores = self.score(user_ids, remove_seen=remove_seen)
@@ -211,7 +283,7 @@ class NCF(tf.keras.Model):
                     te_df[self.col_user].unique(), top_items.shape[1]
                 ),
                 self.col_item: top_items.flatten(),
-                'rating_estimate': top_scores.flatten(),
+                self.col_prediction: top_scores.flatten(),
             }
         )
 
