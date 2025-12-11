@@ -328,3 +328,60 @@ def compute_rocauc(model, te_df):
         return 0.0
     
     return np.mean(auc_scores)
+
+def compute_item_coverage_by_gender(user_recommendations, iid_to_gender, n_items):
+    """Compute item coverage rate separately for female and male users.
+    
+    Computes both aggregate-level coverage (proportion of all items recommended to 
+    at least one user in each group) and individual-level coverage (average of each 
+    user's individual coverage rate).
+    
+    Args:
+        user_recommendations: dict
+            Dictionary where keys are user_iid (user inner IDs) and values are 
+            sets of recommended item IDs for each user.
+        
+        iid_to_gender: dict
+            Dictionary that maps user inner index to gender.
+            Keys are user inner indices, and values are "F" or "M".
+        
+        n_items: int
+            Total number of items in the dataset.
+    
+    Returns:
+        tuple[float, float, float, float]:
+        - Aggregate item coverage rate for female users (range: 0.0 to 1.0)
+        - Aggregate item coverage rate for male users (range: 0.0 to 1.0)
+        - Average individual item coverage rate for female users (range: 0.0 to 1.0)
+        - Average individual item coverage rate for male users (range: 0.0 to 1.0)
+    """
+    # Separate recommended items by gender for aggregate coverage
+    female_items = set()
+    male_items = set()
+    
+    # Track individual coverage rates
+    female_individual_coverages = []
+    male_individual_coverages = []
+    
+    for user_iid, recommended_items in user_recommendations.items():
+        gender = iid_to_gender.get(user_iid)
+        
+        # Calculate individual coverage for this user
+        individual_coverage = len(recommended_items) / n_items if n_items > 0 else 0.0
+        
+        if gender == 'F':
+            female_items.update(recommended_items)
+            female_individual_coverages.append(individual_coverage)
+        elif gender == 'M':
+            male_items.update(recommended_items)
+            male_individual_coverages.append(individual_coverage)
+    
+    # Calculate aggregate coverage rates
+    female_aggregate_coverage = len(female_items) / n_items if n_items > 0 else 0.0
+    male_aggregate_coverage = len(male_items) / n_items if n_items > 0 else 0.0
+    
+    # Calculate average individual coverage rates
+    female_avg_individual_coverage = np.mean(female_individual_coverages) if len(female_individual_coverages) > 0 else 0.0
+    male_avg_individual_coverage = np.mean(male_individual_coverages) if len(male_individual_coverages) > 0 else 0.0
+    
+    return female_aggregate_coverage, male_aggregate_coverage, female_avg_individual_coverage, male_avg_individual_coverage
