@@ -37,9 +37,9 @@ class BaseActiveLearner:
         seed=42, 
         oversample=False, 
         ratio=None, 
-        equal_rate_extend=False,
-        equal_rate_extend_percentage=0.2,
-        equal_rate_extend_gamma=3,
+        low_rate_extend=False,
+        low_rate_extend_percentage=0.2,
+        low_rate_extend_gamma=3,
     ):
         """Initialize the active learner.
         
@@ -71,11 +71,15 @@ class BaseActiveLearner:
             ratio: float
                 Ratio of number of ratings collected at each epoch from female and male users.
 
-            equal_rate_extend: bool
+            low_rate_extend: bool
                 Whether we are extending the query window of users with lower response rate to equalize the response rate.
 
-            equal_rate_extend_percentage: float
-                Percentage of users with lowest response rate to extend the query window for, if `equal_rate_extend` is True.
+            low_rate_extend_percentage: float
+                Percentage of users with lowest response rate to extend the query window for, if `low_rate_extend` is True.
+
+            low_rate_extend_gamma: float
+                Gamma parameter for the low response rate extension, used to calculate the new query window size. 
+                gamma - 1 is the maximum window size after extension.
         """
 
         tf.random.set_seed(seed)
@@ -95,9 +99,9 @@ class BaseActiveLearner:
         # experiment settings
         self.oversample = oversample
         self.ratio = ratio
-        self.equal_rate_extend = equal_rate_extend
-        self.equal_rate_extend_percentage = equal_rate_extend_percentage
-        self.equal_rate_extend_gamma = equal_rate_extend_gamma
+        self.low_rate_extend = low_rate_extend
+        self.low_rate_extend_percentage = low_rate_extend_percentage
+        self.low_rate_extend_gamma = low_rate_extend_gamma
 
         self.col_user = 'user_iid'
         self.col_item = 'item_iid'
@@ -261,9 +265,9 @@ class RatingBasedActiveLearner(BaseActiveLearner):
         seed=42, 
         oversample=False, 
         ratio=None,
-        equal_rate_extend=False,
-        equal_rate_extend_percentage=0.2,
-        equal_rate_extend_gamma=3,
+        low_rate_extend=False,
+        low_rate_extend_percentage=0.2,
+        low_rate_extend_gamma=3,
     ):
 
         super().__init__(
@@ -278,9 +282,9 @@ class RatingBasedActiveLearner(BaseActiveLearner):
             seed, 
             oversample, 
             ratio, 
-            equal_rate_extend, 
-            equal_rate_extend_percentage,
-            equal_rate_extend_gamma,
+            low_rate_extend, 
+            low_rate_extend_percentage,
+            low_rate_extend_gamma,
         )
         
         avail_strategies = ['MaxRating', 'MinRating', 'MixRating', 'Random']
@@ -387,7 +391,7 @@ class RatingBasedActiveLearner(BaseActiveLearner):
         
         print(f"Total number of collected ratings before extending: {count}")
         
-        if self.equal_rate_extend:
+        if self.low_rate_extend:
             
             # compute the 5th and 95th percentile of user response rate
             r_min, r_max = np.percentile(r_N, [5, 95])
@@ -400,11 +404,11 @@ class RatingBasedActiveLearner(BaseActiveLearner):
                 tilde_r_N = np.clip(r_N, r_min, r_max)
 
                 # the proportion to extend the query window size is (r_max - tilde_r_n) / (r_max - r_min)
-                gamma = self.equal_rate_extend_gamma
+                gamma = self.low_rate_extend_gamma
                 f_N = (gamma - 1) * (r_max - tilde_r_N) / (r_max - r_min)
                 
-                # get the users with bottom self.equal_rate_extend_percentage of response rate
-                bottom_r_user_iids = np.argsort(r_N)[:int(self.n_users * self.equal_rate_extend_percentage)]
+                # get the users with bottom self.low_rate_extend_percentage of response rate
+                bottom_r_user_iids = np.argsort(r_N)[:int(self.n_users * self.low_rate_extend_percentage)]
 
                 # print percentage of female users in bottom r user iids
                 bottom_r_user_genders = []
